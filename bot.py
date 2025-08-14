@@ -62,8 +62,9 @@ async def on_message(message):
             for url in urls:
                 logger.info(f"URL détectée: {url}")
                 try:
-                    await shiori_service.save_bookmark(url, message.content)
-                    logger.info(f"URL enregistrée dans Shiori: {url}")
+                    result = await shiori_service.save_bookmark(url, message.content)
+                    if not result:
+                        logger.warning(f"L'URL n'a pas pu être enregistrée dans Shiori: {url}")
                 except Exception as e:
                     logger.error(f"Erreur lors de l'enregistrement de l'URL: {e}", exc_info=True)
         else:

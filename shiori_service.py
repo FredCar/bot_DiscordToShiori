@@ -1,6 +1,8 @@
 import os
 import logging
 import aiohttp
+import time
+import asyncio
 from dotenv import load_dotenv
 
 # Configuration du logging
@@ -15,124 +17,144 @@ class ShioriService:
         self.username = os.getenv('SHIORI_USERNAME')
         self.password = os.getenv('SHIORI_PASSWORD')
         self.token = None
+        self.token_timestamp = 0
+        self.token_expiry = 3600  # Durée de validité du token en secondes (par défaut 1h)
         
         # URL sans /api/v1 pour les endpoints d'API
         self.api_endpoint = self.api_base_url.replace('/api/v1', '')
         
-    async def authenticate(self):
-        """Authentification auprès de l'API Shiori."""
-        auth_url = f"{self.api_base_url}/auth/login"
+        # Configuration des tentatives de reconnexion
+        self.max_retries = 3
+        self.retry_delay = 2  # secondes
         
-        try:
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    auth_url,
-                    json={
-                        "username": self.username,
-                        "password": self.password,
-                        "remember": True
-                    }
-                )
+    async def authenticate(self, force=False):
+        """Authentification auprès de l'API Shiori."""
+        # Vérifie si le token est encore valide (sauf si force=True)
+        current_time = time.time()
+        if not force and self.token and (current_time - self.token_timestamp) < self.token_expiry:
+            return self.token
+            
+        auth_url = f"{self.api_base_url}/auth/login"
+        logger.info(f"Tentative d'authentification à Shiori: {auth_url}")
+        
+        retry_count = 0
+        while retry_count < self.max_retries:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.post(
+                        auth_url,
+                        json={
+                            "username": self.username,
+                            "password": self.password,
+                            "remember": True
+                        },
+                        timeout=30  # Timeout explicite
+                    )
+                    
+                    if resp.status == 200:
+                        data = await resp.json()
+                        
+                        # Extraire le token selon la structure de réponse
+                        if 'session' in data:
+                            self.token = data.get('session')
+                        elif 'token' in data:
+                            self.token = data.get('token')
+                        elif isinstance(data, dict) and 'message' in data and 'token' in data['message']:
+                            self.token = data['message']['token']
+                        
+                        self.token_timestamp = current_time
+                        logger.info("Authentification réussie à Shiori")
+                        return self.token
+                    else:
+                        body = await resp.text()
+                        logger.warning(f"Échec d'authentification (tentative {retry_count+1}/{self.max_retries}): {resp.status} - {body[:200]}")
+                        retry_count += 1
+                        await asyncio.sleep(self.retry_delay)
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout lors de l'authentification (tentative {retry_count+1}/{self.max_retries})")
+                retry_count += 1
+                await asyncio.sleep(self.retry_delay)
+            except aiohttp.ClientError as e:
+                logger.warning(f"Erreur réseau lors de l'authentification (tentative {retry_count+1}/{self.max_retries}): {str(e)}")
+                retry_count += 1
+                await asyncio.sleep(self.retry_delay)
+            except Exception as e:
+                logger.error(f"Erreur inattendue lors de l'authentification: {str(e)}")
+                raise
                 
-                if resp.status == 200:
-                    data = await resp.json()
-                    
-                    # Extraire le token selon la structure de réponse
-                    if 'session' in data:
-                        self.token = data.get('session')
-                    elif 'token' in data:
-                        self.token = data.get('token')
-                    elif isinstance(data, dict) and 'message' in data and 'token' in data['message']:
-                        self.token = data['message']['token']
-                    
-                    logger.info("Authentification réussie à Shiori")
-                    return self.token
-                else:
-                    body = await resp.text()
-                    raise Exception(f"Échec d'authentification: {resp.status} - {body}")
-        except Exception as e:
-            logger.error(f"Erreur lors de la connexion à Shiori: {str(e)}")
-            raise
+        raise Exception(f"Échec d'authentification après {self.max_retries} tentatives")
     
     async def save_bookmark(self, url, description=""):
         """Enregistre une URL dans Shiori."""
-        try:
-            # S'assurer qu'on a un token
-            if not self.token:
+        retry_count = 0
+        
+        while retry_count < self.max_retries:
+            try:
+                # S'assurer qu'on a un token valide
                 await self.authenticate()
-            
-            # Préparation des données - simplifié pour minimiser les erreurs
-            # Utilisons seulement les champs essentiels selon la documentation
-            bookmark_data = {
-                "url": url
-            }
-            
-            # Seulement ajouter ces champs s'ils sont vraiment nécessaires
-            # bookmark_data["createArchive"] = True
-            # bookmark_data["public"] = 0
-            
-            bookmark_url = f"{self.api_endpoint}/api/bookmarks"
-            headers = {"Authorization": f"Bearer {self.token}"}
-            
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    bookmark_url,
-                    json=bookmark_data,
-                    headers=headers
-                )
                 
-                status = resp.status
-                body = await resp.text()
-                logger.info(f"Réponse: statut={status}, corps={body[:100]}...")
+                # Préparation des données
+                bookmark_data = {
+                    "url": url,
+                    "createArchive": True
+                }
                 
-                # Session expirée
-                if status in (401, 403, 500):
-                    logger.info("Session expirée, tentative de reconnexion...")
-                    await self.authenticate()
-                    
-                    # Essayons avec seulement le token dans l'URL comme paramètre
-                    # C'est une méthode alternative qui peut fonctionner avec certaines versions de Shiori
-                    retry_url = f"{bookmark_url}?token={self.token}"
-                    retry_resp = await session.post(
-                        retry_url,
-                        json=bookmark_data
-                        # Pas d'en-tête Authorization ici
+                if description:
+                    bookmark_data["public"] = 0
+                    bookmark_data["tags"] = []
+                    bookmark_data["excerpt"] = description
+                
+                bookmark_url = f"{self.api_endpoint}/api/bookmarks"
+                headers = {"Authorization": f"Bearer {self.token}"}
+                
+                logger.info(f"Tentative d'enregistrement d'URL: {url}")
+                
+                async with aiohttp.ClientSession() as session:
+                    resp = await session.post(
+                        bookmark_url,
+                        json=bookmark_data,
+                        headers=headers,
+                        timeout=60  # Timeout plus long pour le téléchargement de la page
                     )
                     
-                    retry_status = retry_resp.status
-                    retry_body = await retry_resp.text()
-                    logger.info(f"Réponse après reconnexion: statut={retry_status}, corps={retry_body[:100]}...")
+                    status = resp.status
                     
-                    if 200 <= retry_status < 300:
-                        logger.info(f"URL enregistrée dans Shiori: {url}")
+                    # Si le token est invalide, on force une nouvelle authentification
+                    if status in (401, 403):
+                        logger.info("Token expiré, nouvelle authentification...")
+                        await self.authenticate(force=True)
+                        retry_count += 1
+                        continue
+                    
+                    # Pour les erreurs 5xx, on retente
+                    if 500 <= status < 600:
+                        logger.warning(f"Erreur serveur {status}, nouvelle tentative {retry_count+1}/{self.max_retries}")
+                        retry_count += 1
+                        await asyncio.sleep(self.retry_delay)
+                        continue
+                    
+                    body = await resp.text()
+                    
+                    # Succès
+                    if 200 <= status < 300:
+                        logger.info(f"URL enregistrée dans Shiori avec succès: {url}")
                         return True
-                    else:
-                        # Si cela échoue aussi, essayons une dernière approche
-                        alt_headers = {"X-Session-Id": self.token}  # Format alternatif d'authentification
-                        last_resp = await session.post(
-                            bookmark_url,
-                            json=bookmark_data,
-                            headers=alt_headers
-                        )
-                        
-                        last_status = last_resp.status
-                        last_body = await last_resp.text()
-                        logger.info(f"Dernière tentative: statut={last_status}, corps={last_body[:100]}...")
-                        
-                        if 200 <= last_status < 300:
-                            logger.info(f"URL enregistrée dans Shiori avec X-Session-Id: {url}")
-                            return True
-                        else:
-                            raise Exception(f"Échec de l'enregistrement: {retry_status} - {retry_body[:100]}")
+                    
+                    # Autres erreurs
+                    logger.error(f"Échec de l'enregistrement: {status} - {body[:200]}")
+                    return False
+                    
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout lors de l'enregistrement (tentative {retry_count+1}/{self.max_retries})")
+                retry_count += 1
+                await asyncio.sleep(self.retry_delay)
+            except aiohttp.ClientError as e:
+                logger.warning(f"Erreur réseau lors de l'enregistrement (tentative {retry_count+1}/{self.max_retries}): {str(e)}")
+                retry_count += 1
+                await asyncio.sleep(self.retry_delay)
+            except Exception as e:
+                logger.error(f"Erreur inattendue lors de l'enregistrement: {str(e)}")
+                return False
                 
-                # Succès
-                if 200 <= status < 300:
-                    logger.info(f"URL enregistrée dans Shiori: {url}")
-                    return True
-                
-                # Erreur
-                raise Exception(f"Échec de l'enregistrement: {status} - {body[:100]}")
-                
-        except Exception as e:
-            logger.error(f"Erreur lors de l'enregistrement dans Shiori: {str(e)}")
-            raise
+        logger.error(f"Échec de l'enregistrement après {self.max_retries} tentatives: {url}")
+        return False
