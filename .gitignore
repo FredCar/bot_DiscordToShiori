@@ -1,0 +1,44 @@
+# Environnement Python
+venv/
+env/
+.env
+.venv
+ENV/
+
+# Fichiers compilés Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.so
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Fichiers de log
+*.log
+logs/
+
+# Fichiers IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Fichiers de couverture de code
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+coverage.xml
+*.cover
+
+# Fichiers spécifiques au projet
+config.local.py
+credentials.json
+token.json
