@@ -1,0 +1,21 @@
+# Client Discord
+discord.py==2.3.2
+
+# Gestion des variables d'environnement
+python-dotenv==1.0.0
+
+# Client HTTP asynchrone (pour les appels API)
+# Utiliser une version spécifique compatible avec Python 3.12
+aiohttp>=3.9.1
+
+# Alternative si aiohttp pose problème
+requests==2.31.0
+
+# Parsing HTML (utile pour extraire des informations des pages web)
+beautifulsoup4==4.12.2
+
+# Traitement des URLs
+validators==0.22.0
+
+# Formatage et extraction de texte
+markdownify==0.11.6
